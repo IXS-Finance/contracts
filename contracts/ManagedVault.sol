@@ -78,6 +78,9 @@ contract ManagedVault is
     /// @notice Default max NAV change per setNAV call: 50%.
     uint256 public constant DEFAULT_MAX_NAV_CHANGE_BPS = 5_000;
 
+    /// @notice Max accounts per setWhitelistedBatch call — bounds gas per tx.
+    uint256 public constant MAX_BATCH_SIZE = 200;
+
     // =========================================================
     // Types
     // =========================================================
@@ -198,6 +201,7 @@ contract ManagedVault is
     event WhitelistEnabled();
     event WhitelistDisabled();
     event WhitelistUpdated(address indexed account, bool status);
+    event TokenIdentifiersUpdated(string newName, string newSymbol);
 
     /// @notice Emitted on every setNAV call.
     event NavUpdated(uint256 previousPricePerShare, uint256 newPricePerShare);
@@ -361,14 +365,12 @@ contract ManagedVault is
         emit MaxNavChangeBpsUpdated(prev, newMax);
     }
 
-    function setTokenIdentifiers(string memory newName, string memory newSymbol)
-        external
-        onlyRole(DEFAULT_ADMIN_ROLE)
-    {
+    function setTokenIdentifiers(string memory newName, string memory newSymbol) external onlyRole(DEFAULT_ADMIN_ROLE) {
         require(bytes(newName).length > 0, "name is empty");
         require(bytes(newSymbol).length > 0, "symbol is empty");
         _customName = newName;
         _customSymbol = newSymbol;
+        emit TokenIdentifiersUpdated(newName, newSymbol);
     }
 
     // =========================================================
@@ -392,6 +394,7 @@ contract ManagedVault is
     }
 
     function setWhitelistedBatch(address[] calldata accounts, bool status) external onlyRole(OPERATOR_ROLE) {
+        require(accounts.length <= MAX_BATCH_SIZE, "batch too large");
         for (uint256 i = 0; i < accounts.length; i++) {
             require(accounts[i] != address(0), "account is zero");
             whitelist[accounts[i]] = status;
@@ -471,7 +474,8 @@ contract ManagedVault is
     /**
      * @notice Queue a redemption. Shares escrowed until finalized or rejected.
      *
-     * @dev priceAtRequest locked at request time — used for finalization, not audit trail only.
+     * @dev priceAtRequest is indicative only — an audit-trail record of the NAV at request
+     *      time. It has NO effect on settlement: finalizeRedeem prices at live pricePerShare.
      *      feeBpsAtRequest frozen at request — exit fee immune to future fee changes.
      *      Whitelist checked on msg.sender (the regulated party), not receiver.
      *
@@ -482,6 +486,7 @@ contract ManagedVault is
     function requestRedeem(uint256 shares, address receiver) external whenNotPaused nonReentrant returns (uint256 id) {
         require(shares > 0, "shares is zero");
         require(receiver != address(0), "receiver is zero");
+        require(receiver != address(this), "receiver is vault");
         require(previewRedeem(shares) >= minRedeemAssets, "below min redeem");
         _checkWhitelist(msg.sender);
         _checkWhitelist(receiver);
@@ -523,6 +528,7 @@ contract ManagedVault is
         require(_isNavFresh(), "nav is stale");
         RedeemRequest storage request = redeemRequests[id];
         require(request.status == RequestStatus.Pending, "redeem not pending");
+        if (whitelistEnabled) require(whitelist[request.receiver], "receiver not whitelisted");
 
         uint256 grossAssets = request.shares.mulDiv(pricePerShare, 10 ** decimals(), Math.Rounding.Floor);
         uint256 feeAssets = _feeOnRaw(grossAssets, request.feeBpsAtRequest);
@@ -605,7 +611,6 @@ contract ManagedVault is
     function maxDeposit(address receiver) public view override returns (uint256) {
         if (paused()) return 0;
         if (!_isNavFresh()) return 0;
-        if (whitelistEnabled && !whitelist[msg.sender]) return 0;
         if (whitelistEnabled && !whitelist[receiver]) return 0;
         return type(uint256).max;
     }
@@ -613,7 +618,6 @@ contract ManagedVault is
     function maxMint(address receiver) public view override returns (uint256) {
         if (paused()) return 0;
         if (!_isNavFresh()) return 0;
-        if (whitelistEnabled && !whitelist[msg.sender]) return 0;
         if (whitelistEnabled && !whitelist[receiver]) return 0;
         return type(uint256).max;
     }
