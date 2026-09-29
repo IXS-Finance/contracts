@@ -75,6 +75,18 @@ Both vaults issue 18-decimal shares against an asset held off-chain by a custodi
 
 `solc 0.8.28`, optimizer 200 runs, `viaIR = true`, EVM `prague`. Dependencies: [OpenZeppelin Contracts](https://github.com/OpenZeppelin/openzeppelin-contracts/tree/v5.3.0) and [Contracts Upgradeable](https://github.com/OpenZeppelin/openzeppelin-contracts-upgradeable/tree/v5.3.0), both v5.3.0, with the standard `@openzeppelin/` remappings.
 
+## Checksums
+
+SHA-256 of each source file:
+
+| File | SHA-256 |
+|---|---|
+| `contracts/IxsToken.sol` | `fc8bd060111f258522f9448aa2e43c846af65fe64b3c24e1aba00c2f3feedd7f` |
+| `contracts/ERC7540OperatedVault.sol` | `06bbee4ebf141bec36d102eb54107a7b2bcb4e111a17c8f941ae669c33cb890c` |
+| `contracts/ManagedVault.sol` | `b6961f341ea4ca7c97408ca9a4f0fd220a4ba28d3b77ae4fc6954b61d1e45f80` |
+
+Verify with `shasum -a 256 contracts/*.sol`.
+
 ## Security
 
 Report vulnerabilities to **security@ixs.finance**. Don't open public issues.
