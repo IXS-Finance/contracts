@@ -16,11 +16,61 @@ Tests and deployment scripts live in [IXS-Finance/ixs-vaults-uups](https://githu
 
 **Scope:** one file, 56 lines. It is built from stock OpenZeppelin v5.3.0 components (`ERC20`, `ERC20Burnable`, `ERC20Pausable`, `Ownable2Step`). The only custom logic is the `renounceOwnership` guard.
 
+## `IxsMigration`
+
+[`contracts/IxsMigration.sol`](contracts/IxsMigration.sol): a one-way swap from IXS 1.0 to IXS 2.0 on Robinhood Chain, at **1 IXS 1.0 → 10 IXS 2.0**. **Not deployed yet.**
+
+```mermaid
+flowchart LR
+    A["IXS 1.0<br/>Ethereum"] -- "Arbitrum canonical bridge" --> B["Bridged IXS 1.0<br/>Robinhood Chain"]
+    B -- "migrate(amount)" --> C{{"IxsMigration"}}
+    C -- "amount × 10" --> D["IXS 2.0<br/>holder's wallet"]
+    C --> E[("IXS 1.0<br/>locked forever")]
+```
+
+How it works:
+1. Bridge IXS 1.0 from Ethereum to Robinhood Chain over the [Arbitrum canonical bridge](https://portal.arbitrum.io/bridge?sourceChain=ethereum&destinationChain=robinhood-chain).
+2. On Robinhood Chain, `approve` the migration contract, then call `migrate(amount)`.
+3. In the same transaction, the contract takes `amount` IXS 1.0 and sends `amount × 10` IXS 2.0 to the caller.
+
+Design:
+- **Canonical IXS 1.0 only.** The accepted token is fixed at deployment. Any other token named "IXS" is never touched.
+- **Exact and atomic.** 1 → 10 with no fees and no rounding. Both legs settle in one transaction or the whole transaction reverts. If the contract holds too little IXS 2.0, `migrate` reverts and the holder keeps their IXS 1.0.
+- **Pays the caller.** IXS 2.0 always goes to the address that calls `migrate`. For a multisig or smart wallet, that is the multisig or wallet itself.
+- **Pre-funded, never mints.** IXS funds the contract with IXS 2.0 by plain transfer.
+- **Migrated IXS 1.0 is locked forever.** No function can move it. The only IXS 1.0 that can be swept is IXS 1.0 sent to the contract directly by mistake, meaning any balance above `totalMigrated`.
+- **Owner (`Ownable2Step`)** can:
+  - pause and unpause `migrate`;
+  - sweep IXS 2.0 and stray tokens.
+
+  It cannot move migrated IXS 1.0, change the ratio or the tokens, mint, or take tokens from holders. `renounceOwnership` is stock OpenZeppelin.
+- **Not upgradeable.**
+
+**Scope:** one file, 110 lines. It is built from stock OpenZeppelin v5.3.0 components (`Ownable2Step`, `Pausable`, `SafeERC20`).
+
+### Canonical IXS
+
+| Token / contract | Chain | Address |
+|---|---|---|
+| IXS 1.0 (canonical) | Ethereum (1) | [`0x73d7c860998CA3c01Ce8c808F5577d94d545d1b4`](https://etherscan.io/token/0x73d7c860998CA3c01Ce8c808F5577d94d545d1b4) |
+| Arbitrum L1 ERC-20 gateway (bridge escrow) | Ethereum (1) | [`0x85001CC4867C5e1C22dA4B79BB8852B9e2a06da0`](https://etherscan.io/address/0x85001CC4867C5e1C22dA4B79BB8852B9e2a06da0) |
+| IXS 1.0 (bridged, canonical) | Robinhood Chain (4663) | [`0x91d5d2C999C35ce061fD4967e6764Cdd9cF1b3e1`](https://robinhoodchain.blockscout.com/token/0x91d5d2C999C35ce061fD4967e6764Cdd9cF1b3e1) |
+| Arbitrum L2 ERC-20 gateway | Robinhood Chain (4663) | [`0xfd9b17206278C16DdaacF6AC8f05dBf97EdCb31e`](https://robinhoodchain.blockscout.com/address/0xfd9b17206278C16DdaacF6AC8f05dBf97EdCb31e) |
+| IXS 2.0 (`IxsToken`) | Robinhood Chain (4663) | Not deployed |
+| `IxsMigration` | Robinhood Chain (4663) | Not deployed |
+
+The bridged IXS 1.0 is the token that the Arbitrum gateway issues for canonical IXS. Anyone can check this on-chain:
+- `l1Address()` on the bridged token returns the Ethereum IXS address;
+- `calculateL2TokenAddress(0x73d7…d1b4)` on the L2 gateway returns the bridged token.
+
+The bridged token's code is upgradeable by Robinhood Chain's bridge governance, as with every Arbitrum standard-bridged token. IXS cannot upgrade it.
+
 ## Contracts
 
 | Contract | What it is | Upgradeable | Status |
 |---|---|---|---|
 | [`IxsToken`](contracts/IxsToken.sol) | IXS 2.0 ERC-20, fixed 2.5B supply | No | Not deployed |
+| [`IxsMigration`](contracts/IxsMigration.sol) | IXS 1.0 → IXS 2.0 swap, 1:10, one-way | No | Not deployed |
 | [`ERC7540OperatedVault`](contracts/ERC7540OperatedVault.sol) | ERC-4626 vault with async deposits and redemptions (ERC-7540) | UUPS | Live |
 | [`ManagedVault`](contracts/ManagedVault.sol) | ERC-4626 vault with sync deposits and queued redemptions | UUPS | Live |
 
@@ -82,6 +132,7 @@ SHA-256 of each source file:
 | File | SHA-256 |
 |---|---|
 | `contracts/IxsToken.sol` | `fc8bd060111f258522f9448aa2e43c846af65fe64b3c24e1aba00c2f3feedd7f` |
+| `contracts/IxsMigration.sol` | `4755e3c8ed0bce16dce3e054a4c6ce03c57edb39c7389c2aa3d235dc5a04d9bf` |
 | `contracts/ERC7540OperatedVault.sol` | `06bbee4ebf141bec36d102eb54107a7b2bcb4e111a17c8f941ae669c33cb890c` |
 | `contracts/ManagedVault.sol` | `b6961f341ea4ca7c97408ca9a4f0fd220a4ba28d3b77ae4fc6954b61d1e45f80` |
 
