@@ -78,14 +78,15 @@ The bridged token's code is upgradeable by Robinhood Chain's bridge governance, 
 
 | Vault | Chain | Asset | Contract | Proxy | Implementation |
 |---|---|---|---|---|---|
-| IX High Yield Bond (USDC), permissionless | Avalanche (43114) | USDC | `ERC7540OperatedVault` | [`0xaD01573b459805E3954398796203d830B57A8bD9`](https://snowscan.xyz/address/0xaD01573b459805E3954398796203d830B57A8bD9) | [`0x648c66E8791B1Ea20f01db549b49dE7FBa3f2a53`](https://snowscan.xyz/address/0x648c66E8791B1Ea20f01db549b49dE7FBa3f2a53) |
-| IX High Yield Bond (USDC), permissioned | Avalanche (43114) | USDC | `ERC7540OperatedVault` | [`0x864E9C192a724773C2bB8C1e84572996074F0B41`](https://snowscan.xyz/address/0x864E9C192a724773C2bB8C1e84572996074F0B41) | [`0x35F8C1ea3b3Be06E5626F057094E498338f7B821`](https://snowscan.xyz/address/0x35F8C1ea3b3Be06E5626F057094E498338f7B821) |
-| IX High Yield Bond (USDG) | Robinhood Chain (4663) | USDG | `ERC7540OperatedVault` | [`0x4a8B74A9d246082b671540492222e89c9A866498`](https://robinhoodchain.blockscout.com/address/0x4a8B74A9d246082b671540492222e89c9A866498) | [`0xbBCa80A7116aE46b0F249D279Ef43F86274dc4F4`](https://robinhoodchain.blockscout.com/address/0xbBCa80A7116aE46b0F249D279Ef43F86274dc4F4) |
-| ix7540v1 | Base (8453) | USDC | `ERC7540OperatedVault` | [`0x864E9C192a724773C2bB8C1e84572996074F0B41`](https://basescan.org/address/0x864E9C192a724773C2bB8C1e84572996074F0B41) | [`0x35F8C1ea3b3Be06E5626F057094E498338f7B821`](https://basescan.org/address/0x35F8C1ea3b3Be06E5626F057094E498338f7B821) |
+| IX High Yield Bond (USDC), permissionless | Avalanche (43114) | USDC | `ERC7540OperatedVault` | [`0xaD01573b459805E3954398796203d830B57A8bD9`](https://snowscan.xyz/address/0xaD01573b459805E3954398796203d830B57A8bD9) | [`0x648c66E8791B1Ea20f01db549b49dE7FBa3f2a53`](https://snowscan.xyz/address/0x648c66E8791B1Ea20f01db549b49dE7FBa3f2a53) ² |
+| IX High Yield Bond (USDC), permissioned | Avalanche (43114) | USDC | `ERC7540OperatedVault` | [`0x864E9C192a724773C2bB8C1e84572996074F0B41`](https://snowscan.xyz/address/0x864E9C192a724773C2bB8C1e84572996074F0B41) | [`0x35F8C1ea3b3Be06E5626F057094E498338f7B821`](https://snowscan.xyz/address/0x35F8C1ea3b3Be06E5626F057094E498338f7B821) ² |
+| IX High Yield Bond (USDG) | Robinhood Chain (4663) | USDG | `ERC7540OperatedVault` | [`0x4a8B74A9d246082b671540492222e89c9A866498`](https://robinhoodchain.blockscout.com/address/0x4a8B74A9d246082b671540492222e89c9A866498) | [`0xbBCa80A7116aE46b0F249D279Ef43F86274dc4F4`](https://robinhoodchain.blockscout.com/address/0xbBCa80A7116aE46b0F249D279Ef43F86274dc4F4) ² |
+| ix7540v1 | Base (8453) | USDC | `ERC7540OperatedVault` | [`0x864E9C192a724773C2bB8C1e84572996074F0B41`](https://basescan.org/address/0x864E9C192a724773C2bB8C1e84572996074F0B41) | [`0x35F8C1ea3b3Be06E5626F057094E498338f7B821`](https://basescan.org/address/0x35F8C1ea3b3Be06E5626F057094E498338f7B821) ² |
 | ixv1 | BNB Chain (56) | USDC (18 dec) | `ManagedVault` | [`0xc975a3EeF2e49F8eDdEf585340C43f15300fCB82`](https://bscscan.com/address/0xc975a3EeF2e49F8eDdEf585340C43f15300fCB82) | [`0x96D16f6A266fa90702aA3E579aB87F983cEe9FF0`](https://bscscan.com/address/0x96D16f6A266fa90702aA3E579aB87F983cEe9FF0) ¹ |
 
 - Some addresses repeat across chains because the same deployer and nonce were used. Always pair an address with its chain.
 - ¹ Deployed from an earlier revision of `ManagedVault`, so its bytecode does not match the source here.
+- ² Deployed before `requestDepositWithReferral` was added, so their bytecode does not match the source here until upgraded.
 
 ## Vaults
 
@@ -93,6 +94,7 @@ Both vaults issue 18-decimal shares against an asset held off-chain by a custodi
 
 **`ERC7540OperatedVault`**
 - Deposit: `requestDeposit`, then the operator calls `finalizeDepositRequest(id, executionPrice)` to mint shares, or `rejectDepositRequest` to refund.
+- Referral: `requestDepositWithReferral(assets, controller, owner, referralCode)` is `requestDeposit` plus a nonzero `bytes32` introducer code, emitted in `DepositReferral(requestId, controller, referralCode)`. No storage, no on-chain validation. The standard `requestDeposit` is unchanged.
 - Redeem: `requestRedeem` escrows shares, then the operator calls `finalizeRedeemRequest(id, executionPrice)` to pay out, or `rejectRedeemRequest` to return the shares.
 - Settlement uses the execution price only. `setNAV` is a manual override and never prices a settlement.
 - Fees: `subscribeFeeBps` (taken in shares) and `redeemFeeBps` (taken in assets).
@@ -133,7 +135,7 @@ SHA-256 of each source file:
 |---|---|
 | `contracts/IxsToken.sol` | `fc8bd060111f258522f9448aa2e43c846af65fe64b3c24e1aba00c2f3feedd7f` |
 | `contracts/IxsMigration.sol` | `4755e3c8ed0bce16dce3e054a4c6ce03c57edb39c7389c2aa3d235dc5a04d9bf` |
-| `contracts/ERC7540OperatedVault.sol` | `06bbee4ebf141bec36d102eb54107a7b2bcb4e111a17c8f941ae669c33cb890c` |
+| `contracts/ERC7540OperatedVault.sol` | `4f2576f516b93fb24ef4c684504448543ff8504be8c8e227dc550c642c7bd26c` |
 | `contracts/ManagedVault.sol` | `b6961f341ea4ca7c97408ca9a4f0fd220a4ba28d3b77ae4fc6954b61d1e45f80` |
 
 Verify with `shasum -a 256 contracts/*.sol`.

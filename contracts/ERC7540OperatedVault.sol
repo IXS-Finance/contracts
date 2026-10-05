@@ -88,6 +88,11 @@ interface IERC7540Redeem is IERC7540Operator {
  *   actually lost in practice — plain transfer() is never whitelist-gated, so redirecting an
  *   outcome to a different wallet is one extra, unrestricted transfer away.
  *
+ *   Referral attribution: `requestDepositWithReferral` is `requestDeposit` plus a `bytes32`
+ *   introducer/referrer code, recorded in the `DepositReferral` event only — no storage, no
+ *   on-chain validation, no on-chain commission math. The standard `requestDeposit` selector is
+ *   untouched, so ERC-7540 compliance holds; deposits made through it simply carry no code.
+ *
  *   Whitelist gates subscription/redemption only (deposit/requestDeposit/requestRedeem), never
  *   plain transfer()/transferFrom() — deliberate, so the vault token stays freely composable as
  *   lending collateral (Morpho/Aave-style money markets) without breaking on liquidator transfers.
@@ -194,6 +199,7 @@ contract ERC7540OperatedVault is
     error ERC7540OperatedVault__BelowMinDeposit();
     error ERC7540OperatedVault__ControllerMustBeSender();
     error ERC7540OperatedVault__OwnerMustBeSender();
+    error ERC7540OperatedVault__ReferralCodeIsZero();
     error ERC7540OperatedVault__DepositNotPending();
     error ERC7540OperatedVault__GrossSharesIsZero();
     error ERC7540OperatedVault__NetSharesIsZero();
@@ -340,6 +346,10 @@ contract ERC7540OperatedVault is
     event DepositRequested(
         uint256 indexed id, address indexed controller, uint256 assets, uint256 subscribeFeeBpsAtRequest
     );
+    /// @notice Introducer/referrer attribution — emitted only by requestDepositWithReferral, right
+    ///         after the standard request events. All three fields indexed so off-chain
+    ///         reconciliation can filter by code directly.
+    event DepositReferral(uint256 indexed requestId, address indexed controller, bytes32 indexed referralCode);
     event DepositRequestFinalized(
         uint256 indexed id,
         address indexed controller,
@@ -613,6 +623,31 @@ contract ERC7540OperatedVault is
         whenNotPaused
         returns (uint256 requestId)
     {
+        requestId = _requestDeposit(assets, controller, owner);
+    }
+
+    /**
+     * @notice requestDeposit plus introducer/referrer attribution. Identical checks, transfers and
+     *         request state — the only addition is the DepositReferral event.
+     *
+     * @dev Not part of IERC7540Deposit — a separate selector, so the standard interfaceId is
+     *      unchanged. `referralCode` is not validated on-chain beyond nonzero; callers without a
+     *      code use requestDeposit.
+     */
+    function requestDepositWithReferral(uint256 assets, address controller, address owner, bytes32 referralCode)
+        external
+        nonReentrant
+        whenNotPaused
+        returns (uint256 requestId)
+    {
+        if (referralCode == bytes32(0)) revert ERC7540OperatedVault__ReferralCodeIsZero();
+        requestId = _requestDeposit(assets, controller, owner);
+        emit DepositReferral(requestId, msg.sender, referralCode);
+    }
+
+    /// @dev Shared body of requestDeposit/requestDepositWithReferral. Callers apply nonReentrant
+    ///      and whenNotPaused.
+    function _requestDeposit(uint256 assets, address controller, address owner) internal returns (uint256 requestId) {
         if (assets == 0) revert ERC7540OperatedVault__DepositAssetsIsZero();
         if (controller != msg.sender) revert ERC7540OperatedVault__ControllerMustBeSender();
         if (owner != msg.sender) revert ERC7540OperatedVault__OwnerMustBeSender();
