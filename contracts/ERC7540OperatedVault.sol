@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 IXS
-pragma solidity 0.8.28;
+pragma solidity 0.8.37;
 
 import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import {AccessControlUpgradeable} from "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
@@ -63,7 +63,8 @@ interface IERC7540Redeem is IERC7540Operator {
  *   a receipt token for that position. IXS's value-add is the license, the KYC/compliance layer,
  *   and execution access — not portfolio management or asset selection.
  *
- *   Async on both sides (ERC-7540), execution-price settled:
+ *   Async on both sides (ERC-7540-style request flow, not ERC-7540 compliant — see below),
+ *   execution-price settled:
  *     - Deposits and redemptions are both request → finalize/reject, two states each
  *       (Pending → Finalized/Rejected). No routine NAV cron, no fund-NAV pool.
  *     - finalizeDepositRequest/finalizeRedeemRequest each take an explicit `executionPrice` —
@@ -83,15 +84,20 @@ interface IERC7540Redeem is IERC7540Operator {
  *   protocol (fees round up, base conversions round down).
  *
  *   Controller-only, no redirect: every request requires `msg.sender == controller == owner`,
- *   matching strict ERC-7540 signatures exactly (no separate `receiver` parameter). Preserves
- *   blind interoperability with generic ERC-7540 tooling that calls by exact selector. Nothing is
+ *   using the ERC-7540 request signatures (no separate `receiver` parameter). Nothing is
  *   actually lost in practice — plain transfer() is never whitelist-gated, so redirecting an
  *   outcome to a different wallet is one extra, unrestricted transfer away.
  *
  *   Referral attribution: `requestDepositWithReferral` is `requestDeposit` plus a `bytes32`
  *   introducer/referrer code, recorded in the `DepositReferral` event only — no storage, no
- *   on-chain validation, no on-chain commission math. The standard `requestDeposit` selector is
- *   untouched, so ERC-7540 compliance holds; deposits made through it simply carry no code.
+ *   on-chain validation, no on-chain commission math. The plain `requestDeposit` selector is
+ *   untouched; deposits made through it simply carry no code.
+ *
+ *   Not ERC-7540 compliant, by design (Zokyo v1 #5): settlement pushes shares/assets straight to
+ *   the controller (no Claimable state; the claim functions revert), there is no operator
+ *   delegation, and the previews return estimates. supportsInterface therefore does not advertise
+ *   the ERC-7540 interface IDs. Integrators use the request → finalize/reject flow described here,
+ *   not generic ERC-7540 claim tooling.
  *
  *   Whitelist gates subscription/redemption only (deposit/requestDeposit/requestRedeem), never
  *   plain transfer()/transferFrom() — deliberate, so the vault token stays freely composable as
@@ -133,7 +139,11 @@ contract ERC7540OperatedVault is
 
     uint256 public constant MAX_BPS = 10_000;
 
-    /// @notice Default NAV staleness threshold: 48 hours. Informational/monitoring signal only —
+    /// @notice Hard cap on subscribeFeeBps / redeemFeeBps: 10%. A guard against admin mistakes, not
+    ///         a business limit — raising it takes an upgrade (Zokyo v1 #18).
+    uint256 public constant MAX_FEE_BPS = 1_000;
+
+    /// @notice Default NAV staleness threshold: 30 days. Informational/monitoring signal only —
     ///         does NOT gate finalizeDepositRequest/finalizeRedeemRequest (both are always priced
     ///         off a live, real executionPrice supplied at call time).
     uint256 public constant DEFAULT_NAV_STALENESS = 30 days;
@@ -188,6 +198,7 @@ contract ERC7540OperatedVault is
     error ERC7540OperatedVault__FeeBpsTooHigh();
     error ERC7540OperatedVault__FeeRecipientIsZero();
     error ERC7540OperatedVault__MaxNavChangeUnreasonablyHigh();
+    error ERC7540OperatedVault__MaxNavChangeIsZero();
     error ERC7540OperatedVault__AccountIsZero();
     error ERC7540OperatedVault__BatchTooLarge();
     error ERC7540OperatedVault__PriceIsZero();
@@ -213,6 +224,11 @@ contract ERC7540OperatedVault is
     error ERC7540OperatedVault__NavChangeTooLarge();
     error ERC7540OperatedVault__CustodyIsVault();
     error ERC7540OperatedVault__CustodyIsAsset();
+    error ERC7540OperatedVault__FeeRecipientIsVault();
+    error ERC7540OperatedVault__FeeRecipientIsAsset();
+    error ERC7540OperatedVault__CannotRemoveOwnAdminRole();
+    error ERC7540OperatedVault__NavNotInitialized();
+    error ERC7540OperatedVault__OperatorDelegationNotSupported();
     error ERC7540OperatedVault__NothingToClaim();
     error ERC7540OperatedVault__AsyncOnlyUseRequestDeposit();
     error ERC7540OperatedVault__AsyncOnlyUseRequestRedeem();
@@ -265,6 +281,8 @@ contract ERC7540OperatedVault is
 
     /// @notice Gates requestDeposit/requestRedeem only. Never gates plain transfer()/transferFrom()
     ///         — deliberate, preserves composability as lending collateral (Morpho/Aave-style).
+    ///         Checked at request time AND again at finalize: a controller removed from the list
+    ///         while a request is pending cannot be settled, only rejected (Zokyo v1 #12).
     bool public whitelistEnabled;
     mapping(address => bool) public whitelist;
 
@@ -451,6 +469,20 @@ contract ERC7540OperatedVault is
     function _authorizeUpgrade(address) internal override onlyRole(DEFAULT_ADMIN_ROLE) {}
 
     // =========================================================
+    // Admin — role safety
+    // =========================================================
+
+    /// @dev An admin can never remove its own DEFAULT_ADMIN_ROLE, via renounceRole or revokeRole on itself.
+    ///      Removing an admin always takes a different admin, so at least one admin always remains and
+    ///      upgrades stay possible. Handover: grant the new admin, then the new admin revokes the old one.
+    function _revokeRole(bytes32 role, address account) internal override returns (bool) {
+        if (role == DEFAULT_ADMIN_ROLE && account == _msgSender()) {
+            revert ERC7540OperatedVault__CannotRemoveOwnAdminRole();
+        }
+        return super._revokeRole(role, account);
+    }
+
+    // =========================================================
     // Admin — pause
     // =========================================================
 
@@ -477,15 +509,17 @@ contract ERC7540OperatedVault is
         emit CustodyUpdated(prev, newCustody);
     }
 
+    /// @notice Capped at MAX_FEE_BPS (10%); see that constant (Zokyo v1 #18).
     function setSubscribeFeeBps(uint256 newFeeBps) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        if (newFeeBps > MAX_BPS) revert ERC7540OperatedVault__FeeBpsTooHigh();
+        if (newFeeBps > MAX_FEE_BPS) revert ERC7540OperatedVault__FeeBpsTooHigh();
         uint256 prev = subscribeFeeBps;
         subscribeFeeBps = newFeeBps;
         emit SubscribeFeeBpsUpdated(prev, newFeeBps);
     }
 
+    /// @notice Capped at MAX_FEE_BPS (10%); see that constant (Zokyo v1 #18).
     function setRedeemFeeBps(uint256 newFeeBps) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        if (newFeeBps > MAX_BPS) revert ERC7540OperatedVault__FeeBpsTooHigh();
+        if (newFeeBps > MAX_FEE_BPS) revert ERC7540OperatedVault__FeeBpsTooHigh();
         uint256 prev = redeemFeeBps;
         redeemFeeBps = newFeeBps;
         emit RedeemFeeBpsUpdated(prev, newFeeBps);
@@ -493,6 +527,9 @@ contract ERC7540OperatedVault is
 
     function setFeeRecipient(address newFeeRecipient) external onlyRole(DEFAULT_ADMIN_ROLE) {
         if (newFeeRecipient == address(0)) revert ERC7540OperatedVault__FeeRecipientIsZero();
+        // Same rule as custody: fee shares minted to the vault or assets sent to the token are unrecoverable.
+        if (newFeeRecipient == address(this)) revert ERC7540OperatedVault__FeeRecipientIsVault();
+        if (newFeeRecipient == asset()) revert ERC7540OperatedVault__FeeRecipientIsAsset();
         address prev = feeRecipient;
         feeRecipient = newFeeRecipient;
         emit FeeRecipientUpdated(prev, newFeeRecipient);
@@ -520,8 +557,10 @@ contract ERC7540OperatedVault is
     ///         necessity. A genuine price increase bigger than 1,000% in one settlement needs more
     ///         than one step (raise, update, reset, update again) since no single call here can
     ///         authorize it in one shot. Decreases never need this — a price can only ever fall to
-    ///         zero (100%), well under this ceiling.
+    ///         zero (100%), well under this ceiling. Floor is 1 bps: 0 would block every settlement
+    ///         at a new price (Zokyo v1 #18).
     function setMaxNavChangeBps(uint256 newMax) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (newMax == 0) revert ERC7540OperatedVault__MaxNavChangeIsZero();
         if (newMax > MAX_BPS * 10) revert ERC7540OperatedVault__MaxNavChangeUnreasonablyHigh();
         uint256 prev = maxNavChangeBps;
         maxNavChangeBps = newMax;
@@ -696,6 +735,8 @@ contract ERC7540OperatedVault is
         onlyRole(OPERATOR_ROLE)
     {
         if (executionPrice == 0) revert ERC7540OperatedVault__PriceIsZero();
+        // First price must come from setNAV, so every settlement is checked by the deviation guard.
+        if (pricePerShare == 0) revert ERC7540OperatedVault__NavNotInitialized();
         DepositRequestData storage request = depositRequests[requestId];
         if (request.status != RequestStatus.Pending) revert ERC7540OperatedVault__DepositNotPending();
         _checkWhitelist(request.controller);
@@ -725,7 +766,10 @@ contract ERC7540OperatedVault is
         emit DepositRequestFinalized(
             requestId, request.controller, request.assets, grossShares, feeShares, netShares, executionPrice
         );
-        // ERC-4626/ERC-7575 Deposit event emits gross (pre-fee) shares per spec convention.
+        // Deposit event carries gross (pre-fee) shares and msg.sender (the operator) by IXS design, kept
+        // unchanged on the live proxies so the event history stays consistent for indexers. ERC-4626 defines
+        // `shares` as what `owner` received; the net amount and the fee are in DepositRequestFinalized
+        // (Zokyo v1 #15).
         emit Deposit(msg.sender, request.controller, request.assets, grossShares);
     }
 
@@ -820,6 +864,7 @@ contract ERC7540OperatedVault is
         onlyRole(OPERATOR_ROLE)
     {
         if (executionPrice == 0) revert ERC7540OperatedVault__PriceIsZero();
+        if (pricePerShare == 0) revert ERC7540OperatedVault__NavNotInitialized();
         RedeemRequestData storage request = redeemRequests[requestId];
         if (request.status != RequestStatus.Pending) revert ERC7540OperatedVault__RedeemNotPending();
         _checkWhitelist(request.controller);
@@ -851,7 +896,9 @@ contract ERC7540OperatedVault is
         emit RedeemRequestFinalized(
             requestId, request.controller, request.shares, grossAssets, feeAssets, netAssets, executionPrice
         );
-        // ERC-4626/ERC-7575 Withdraw event emits grossAssets per spec.
+        // Withdraw event carries grossAssets and msg.sender (the operator) by IXS design, kept unchanged on
+        // the live proxies so the event history stays consistent for indexers. ERC-4626 defines `assets` as
+        // what `receiver` received; the net amount and the fee are in RedeemRequestFinalized (Zokyo v1 #15).
         emit Withdraw(msg.sender, request.controller, request.controller, grossAssets, request.shares);
     }
 
@@ -873,16 +920,15 @@ contract ERC7540OperatedVault is
     }
 
     // =========================================================
-    // ERC-7540 — operator delegation (disabled, decision: owner-only, no delegation in v1)
+    // ERC-7540 — operator delegation (not supported: controller-only, no delegation in v1)
     // =========================================================
 
-    /// @notice Third-party operator delegation is not supported in v1. Returns `false` for a grant
-    ///         attempt (rejected, per this function's own success/failure return convention) rather
-    ///         than reverting, so generic ERC-7540 tooling that unconditionally calls this during
-    ///         setup degrades gracefully instead of hard-failing. Revoking (`approved == false`) is
-    ///         trivially valid — there was never an operator set — so it returns `true`.
-    function setOperator(address, bool approved) external pure returns (bool) {
-        return !approved;
+    /// @notice Third-party operator delegation is not supported: every request requires
+    ///         `msg.sender == controller == owner`, so there is no operator state to set. Reverts for
+    ///         every input instead of returning a value that no state backs (Zokyo v1 #5). The vault
+    ///         does not advertise the ERC-7540 interface IDs, so standard tooling will not call this.
+    function setOperator(address, bool) external pure returns (bool) {
+        revert ERC7540OperatedVault__OperatorDelegationNotSupported();
     }
 
     /// @notice Always false — no operator delegation is ever configured.
@@ -946,17 +992,14 @@ contract ERC7540OperatedVault is
     // ERC-165
     // =========================================================
 
-    /// @dev `type(IERC7540Deposit/Redeem/Operator).interfaceId` verified by direct computation to
-    ///      equal the published EIP-7540 constants (0xce3bbe50 / 0x620ee8e4 / 0xe3bc4e65) — this
-    ///      required including the deposit/mint claim overloads directly in the `IERC7540Deposit`
-    ///      interface body above, since Solidity excludes inherited-interface selectors from the
-    ///      XOR otherwise. ERC-7575's constant (0x2f0a18c5, from the published EIP text) is
-    ///      hardcoded rather than computed, since formally inheriting the full IERC7575 interface
-    ///      conflicts with events ERC4626Upgradeable/ERC20Upgradeable already declare.
+    /// @dev Advertises ERC-165, AccessControl and ERC-7575 (`share()`) only. The ERC-7540 interface
+    ///      IDs are deliberately NOT advertised: the vault uses the ERC-7540 request flow but settles
+    ///      by push, so generic ERC-7540 tooling must not treat it as compliant (Zokyo v1 #5).
+    ///      ERC-7575's constant (0x2f0a18c5, from the published EIP text) is hardcoded rather than
+    ///      computed, since formally inheriting the full IERC7575 interface conflicts with events
+    ///      ERC4626Upgradeable/ERC20Upgradeable already declare.
     function supportsInterface(bytes4 interfaceId) public view override(AccessControlUpgradeable) returns (bool) {
-        return interfaceId == type(IERC7540Deposit).interfaceId || interfaceId == type(IERC7540Redeem).interfaceId
-            || interfaceId == type(IERC7540Operator).interfaceId || interfaceId == 0x2f0a18c5
-            || super.supportsInterface(interfaceId);
+        return interfaceId == 0x2f0a18c5 || super.supportsInterface(interfaceId);
     }
 
     // =========================================================
@@ -1013,10 +1056,26 @@ contract ERC7540OperatedVault is
     }
 
     /// @notice Estimate only, at the current indicative pricePerShare — not binding, the real
-    ///         outcome is priced at finalizeRedeemRequest's executionPrice.
+    ///         outcome is priced at finalizeRedeemRequest's executionPrice. Inclusive of redeemFeeBps
+    ///         (ERC-4626): the shares whose gross proceeds, less the fee taken from that gross, net
+    ///         to `assets` — the same way finalizeRedeemRequest takes the fee (Zokyo v1 #7).
     function previewWithdraw(uint256 assets) public view override returns (uint256) {
-        uint256 fee = _feeOnRaw(assets, redeemFeeBps);
-        return super.previewWithdraw(assets + fee);
+        if (assets == 0) return 0;
+        // Unreachable through the setters (fees are capped at MAX_FEE_BPS); guards a stored value.
+        if (redeemFeeBps >= MAX_BPS) revert ERC7540OperatedVault__FeeBpsTooHigh();
+        uint256 grossAssets = assets.mulDiv(MAX_BPS, MAX_BPS - redeemFeeBps, Math.Rounding.Ceil);
+        return super.previewWithdraw(grossAssets);
+    }
+
+    /// @notice Estimate only, at the current indicative pricePerShare — not binding. Inclusive of
+    ///         subscribeFeeBps (ERC-4626): the assets whose gross shares, less the fee taken from
+    ///         that gross, net to `shares` — the same way finalizeDepositRequest takes the fee
+    ///         (Zokyo v1 #7).
+    function previewMint(uint256 shares) public view override returns (uint256) {
+        if (shares == 0) return 0;
+        if (subscribeFeeBps >= MAX_BPS) revert ERC7540OperatedVault__FeeBpsTooHigh();
+        uint256 grossShares = shares.mulDiv(MAX_BPS, MAX_BPS - subscribeFeeBps, Math.Rounding.Ceil);
+        return super.previewMint(grossShares);
     }
 
     /// @notice Estimate only, at the current indicative pricePerShare — not binding.
@@ -1100,7 +1159,8 @@ contract ERC7540OperatedVault is
      *        - the public setNAV() (NAV_MANAGER_ROLE), rarely, for out-of-band corrections or
      *          in-kind distribution accruals.
      *      Deviation guard applies uniformly regardless of caller. Skipped on the very first call
-     *      (pricePerShare == 0) — no genesis/bootstrap special-casing needed beyond this.
+     *      (pricePerShare == 0), which can only be setNAV: both finalize functions revert
+     *      NavNotInitialized until a first price exists.
      */
     function _updatePricePerShare(uint256 newPricePerShare) internal {
         if (pricePerShare > 0) {
