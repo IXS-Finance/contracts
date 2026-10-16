@@ -159,7 +159,7 @@ Verify with `shasum -a 256 contracts/*.sol`.
 
 ## Audit
 
-Zokyo reviewed `IxsToken`, `IxsMigration` and `ERC7540OperatedVault` at commit [`f760948`](https://github.com/IXS-Finance/vault-contracts/tree/f760948fffcbdaa21845de988587a8a797669cf0). This revision carries the fixes from that review; the NatSpec cites them as `Zokyo v1 #N`. `ManagedVault` was not in scope.
+Zokyo reviewed `IxsToken`, `IxsMigration` and `ERC7540OperatedVault` at commit [`f760948`](https://github.com/IXS-Finance/contracts/tree/f760948fffcbdaa21845de988587a8a797669cf0). This revision carries the fixes from that review; the NatSpec cites them as `Zokyo v1 #N`. `ManagedVault` was not in scope.
 
 ## Security
 
