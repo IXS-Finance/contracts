@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 IXS
-pragma solidity 0.8.28;
+pragma solidity 0.8.37;
 
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {ERC20Burnable} from "@openzeppelin/contracts/token/ERC20/extensions/ERC20Burnable.sol";
@@ -16,7 +16,7 @@ import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
  *   - The owner can only pause / unpause, and transfer or renounce that role.
  *     It cannot mint, move, seize or blacklist tokens.
  *   - Not upgradeable. No permit (EIP-2612).
- * @custom:security-contact security@ixs.finance
+ * @custom:security-contact security@investax.io
  *
  * @dev Stock OpenZeppelin v5 components; the only custom logic is the renounceOwnership guard.
  *   Ownership is two-step (Ownable2Step): transferOwnership only nominates a pending owner, which
@@ -35,6 +35,7 @@ contract IxsToken is ERC20, ERC20Burnable, ERC20Pausable, Ownable2Step {
     }
 
     /// @notice Halts all balance changes (transfer, transferFrom, burn, burnFrom). Approvals still work.
+    ///   This also stops IxsMigration, whose payouts are IXS 2.0 transfers.
     function pause() external onlyOwner {
         _pause();
     }
